@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// إعدادات صارمة جداً لتقليل استهلاك الذاكرة العشوائية (RAM) في الاستضافات المجانية
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: './.data/auth' }),
     puppeteer: {
@@ -22,19 +21,15 @@ const client = new Client({
             '--single-process',
             '--disable-gpu',
             '--disable-software-rasterizer',
-            '--disable-extensions',
             '--mute-audio',
-            '--disable-background-networking',
-            '--disable-sync',
-            '--metrics-recording-only',
-            '--disable-default-apps'
+            '--disable-background-networking'
         ]
     }
 });
 
 let qrCodeData = '';
 let isReady = false;
-let statusMessage = 'جاري تهيئة النظام ومكتبة الواتساب...';
+let statusMessage = 'جاري تهيئة النظام...';
 
 client.on('qr', (qr) => {
     qrCodeData = qr;
@@ -44,7 +39,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('authenticated', () => {
-    statusMessage = 'تمت المصادقة! جاري مزامنة البيانات (يرجى الانتظار)...';
+    statusMessage = 'تمت المصادقة! جاري مزامنة البيانات بلطف...';
     console.log('تمت المصادقة!');
 });
 
@@ -53,12 +48,6 @@ client.on('ready', () => {
     qrCodeData = '';
     statusMessage = 'الواتساب متصل بنجاح وجاهز للعمل!';
     console.log('الواتساب متصل بنجاح وجاهز!');
-});
-
-client.on('auth_failure', (msg) => {
-    isReady = false;
-    statusMessage = 'حدث فشل في المصادقة.';
-    console.error('فشل في المصادقة:', msg);
 });
 
 client.on('disconnected', (reason) => {
@@ -71,45 +60,75 @@ client.on('disconnected', (reason) => {
 
 client.initialize();
 
-app.get('/', async (req, res) => {
-    let htmlContent = `
+// نقطة فحص الحالة (API خفيف جداً لا يستهلك الذاكرة)
+app.get('/status-check', (req, res) => {
+    res.json({ isReady, qrCodeData, statusMessage });
+});
+
+// الواجهة التفاعلية (Dashboard) الخفيفة
+app.get('/', (req, res) => {
+    const htmlContent = `
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <meta http-equiv="refresh" content="3">
         <title>نظام الإرسال (Lovable API)</title>
         <style>
             body { font-family: Tahoma, Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #f4f4f9; }
             .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); display: inline-block; max-width: 500px; }
-            .status { padding: 15px; margin-top: 20px; border-radius: 5px; font-weight: bold; font-size: 18px; }
-            .ready { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-            .waiting { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+            #status-box { padding: 15px; margin-top: 20px; border-radius: 5px; font-weight: bold; font-size: 18px; background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+            .ready-bg { background-color: #d4edda !important; color: #155724 !important; border-color: #c3e6cb !important; }
+            img { margin-top: 20px; border: 2px solid #000; padding: 10px; border-radius: 10px; display: none; }
             .note { color: #666; font-size: 13px; margin-top: 15px; }
         </style>
     </head>
     <body>
         <div class="container">
             <h2>نظام الإرسال (Lovable API)</h2>
+            <div id="status-box">⚙️ جاري جلب الحالة...</div>
+            <img id="qr-image" src="" alt="QR Code" />
+            <p class="note">هذه الصفحة تحدث نفسها بهدوء دون إرهاق الخادم.</p>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+        <script>
+            async function checkStatus() {
+                try {
+                    const response = await fetch('/status-check');
+                    const data = await response.json();
+                    
+                    const statusBox = document.getElementById('status-box');
+                    const qrImg = document.getElementById('qr-image');
+
+                    statusBox.innerHTML = data.isReady ? '✅ ' + data.statusMessage : '⏳ ' + data.statusMessage;
+                    
+                    if (data.isReady) {
+                        statusBox.classList.add('ready-bg');
+                        qrImg.style.display = 'none';
+                    } else {
+                        statusBox.classList.remove('ready-bg');
+                        if (data.qrCodeData) {
+                            QRCode.toDataURL(data.qrCodeData, function (err, url) {
+                                if (!err) {
+                                    qrImg.src = url;
+                                    qrImg.style.display = 'inline-block';
+                                }
+                            });
+                        } else {
+                            qrImg.style.display = 'none';
+                        }
+                    }
+                } catch (error) {
+                    console.log("جارٍ محاولة الاتصال بالخادم...");
+                }
+            }
+            // فحص الحالة كل 3 ثوانٍ برمجياً (بدون إعادة تحميل الصفحة)
+            setInterval(checkStatus, 3000);
+            checkStatus();
+        </script>
+    </body>
+    </html>
     `;
-
-    if (isReady) {
-        htmlContent += `<div class="status ready">✅ ${statusMessage}</div>`;
-    } else if (qrCodeData) {
-        try {
-            const qrImage = await qrcode.toDataURL(qrCodeData);
-            htmlContent += `
-                <div class="status waiting">⏳ ${statusMessage}</div>
-                <img src="${qrImage}" alt="QR Code" style="margin-top: 20px; border: 2px solid #000; padding: 10px; border-radius: 10px;" />
-            `;
-        } catch (err) {
-            htmlContent += `<p style="color:red;">خطأ في عرض الباركود.</p>`;
-        }
-    } else {
-        htmlContent += `<div class="status waiting">⚙️ ${statusMessage}</div>`;
-    }
-
-    htmlContent += `</div></body></html>`;
     res.send(htmlContent);
 });
 
