@@ -3,6 +3,7 @@ const cors = require('cors');
 const qrcode = require('qrcode');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -13,7 +14,6 @@ let qrCodeData = '';
 let statusMessage = 'جاري تهيئة النظام (Baileys)...';
 let sock;
 
-// دالة الاتصال بالواتساب
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
@@ -36,15 +36,23 @@ async function connectToWhatsApp() {
         }
 
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            isReady = false;
-            
-            if (shouldReconnect) {
-                statusMessage = 'انقطع الاتصال. جاري إعادة المحاولة...';
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            console.log('انقطع الاتصال بسبب الخطأ رقم:', statusCode);
+
+            // إذا كان الخطأ بسبب تسجيل خروج أو جلسة تالفة (401)، نقوم بمسح الملفات فوراً
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 405) {
+                console.log('جلسة غير صالحة، جاري حذف الملفات القديمة...');
+                statusMessage = 'جاري تنظيف الجلسة لإنشاء باركود جديد...';
+                try {
+                    fs.rmSync('./auth_info_baileys', { recursive: true, force: true });
+                } catch(e) {}
+                isReady = false;
+                qrCodeData = '';
                 connectToWhatsApp();
             } else {
-                statusMessage = 'تم تسجيل الخروج. يرجى مسح الباركود من جديد.';
-                connectToWhatsApp();
+                statusMessage = 'انقطع الاتصال مؤقتاً. جاري إعادة المحاولة...';
+                isReady = false;
+                setTimeout(connectToWhatsApp, 3000);
             }
         } else if (connection === 'open') {
             isReady = true;
