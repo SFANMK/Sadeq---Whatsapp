@@ -1,71 +1,73 @@
 const express = require('express');
 const cors = require('cors');
-const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: './.data/auth' }),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu',
-            '--disable-software-rasterizer',
-            '--mute-audio',
-            '--disable-background-networking'
-        ]
-    }
-});
-
-let qrCodeData = '';
 let isReady = false;
-let statusMessage = 'جاري تهيئة النظام...';
+let qrCodeData = '';
+let statusMessage = 'جاري تهيئة النظام (Baileys)...';
+let sock;
 
-client.on('qr', (qr) => {
-    qrCodeData = qr;
-    isReady = false;
-    statusMessage = 'بانتظار مسح الباركود...';
-    console.log('تم إنشاء رمز QR جديد.');
-});
+// دالة الاتصال بالواتساب
+async function connectToWhatsApp() {
+    // حفظ ملفات الجلسة لكي لا يطلب الباركود في كل مرة
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-client.on('authenticated', () => {
-    statusMessage = 'تمت المصادقة! جاري مزامنة البيانات بلطف...';
-    console.log('تمت المصادقة!');
-});
+    sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        // إخفاء سجلات المكتبة لتخفيف الضغط على الخادم
+        logger: pino({ level: 'silent' }) 
+    });
 
-client.on('ready', () => {
-    isReady = true;
-    qrCodeData = '';
-    statusMessage = 'الواتساب متصل بنجاح وجاهز للعمل!';
-    console.log('الواتساب متصل بنجاح وجاهز!');
-});
+    // تحديث ملفات الاعتماد عند الاتصال
+    sock.ev.on('creds.update', saveCreds);
 
-client.on('disconnected', (reason) => {
-    isReady = false;
-    qrCodeData = '';
-    statusMessage = 'انقطع الاتصال بالواتساب. جاري إعادة التشغيل...';
-    console.log('تم فصل الاتصال:', reason);
-    client.destroy().then(() => client.initialize()).catch(() => client.initialize());
-});
+    // مراقبة حالة الاتصال
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-client.initialize();
+        if (qr) {
+            qrCodeData = qr;
+            isReady = false;
+            statusMessage = 'بانتظار مسح الباركود...';
+            console.log('تم إنشاء باركود جديد.');
+        }
 
-// نقطة فحص الحالة (API خفيف جداً لا يستهلك الذاكرة)
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
+            isReady = false;
+            
+            if (shouldReconnect) {
+                statusMessage = 'انقطع الاتصال. جاري إعادة المحاولة...';
+                connectToWhatsApp();
+            } else {
+                statusMessage = 'تم تسجيل الخروج. يرجى مسح الباركود من جديد.';
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            isReady = true;
+            qrCodeData = '';
+            statusMessage = 'الواتساب متصل بنجاح وجاهز للعمل!';
+            console.log('تم الاتصال بنجاح!');
+        }
+    });
+}
+
+// تشغيل الواتساب عند بدء الخادم
+connectToWhatsApp();
+
+// نقطة فحص الحالة للواجهة (بدون إرهاق الخادم)
 app.get('/status-check', (req, res) => {
     res.json({ isReady, qrCodeData, statusMessage });
 });
 
-// الواجهة التفاعلية (Dashboard) الخفيفة
+// الواجهة التفاعلية (Dashboard)
 app.get('/', (req, res) => {
     const htmlContent = `
     <!DOCTYPE html>
@@ -84,7 +86,7 @@ app.get('/', (req, res) => {
     </head>
     <body>
         <div class="container">
-            <h2>نظام الإرسال (Lovable API)</h2>
+            <h2>نظام الإرسال الخفيف (Baileys API)</h2>
             <div id="status-box">⚙️ جاري جلب الحالة...</div>
             <img id="qr-image" src="" alt="QR Code" />
             <p class="note">هذه الصفحة تحدث نفسها بهدوء دون إرهاق الخادم.</p>
@@ -122,7 +124,6 @@ app.get('/', (req, res) => {
                     console.log("جارٍ محاولة الاتصال بالخادم...");
                 }
             }
-            // فحص الحالة كل 3 ثوانٍ برمجياً (بدون إعادة تحميل الصفحة)
             setInterval(checkStatus, 3000);
             checkStatus();
         </script>
@@ -132,19 +133,24 @@ app.get('/', (req, res) => {
     res.send(htmlContent);
 });
 
+// إرسال الكود من تطبيق Lovable
 app.post('/send-otp', async (req, res) => {
     const { phoneNumber, otpCode } = req.body;
+    
     if (!isReady) return res.status(500).json({ success: false, error: 'الواتساب غير متصل في الخادم حالياً.' });
     if (!phoneNumber || !otpCode) return res.status(400).json({ success: false, error: 'البيانات ناقصة.' });
 
     try {
         const cleanNumber = phoneNumber.replace(/\D/g, '');
-        const formattedNumber = `${cleanNumber}@c.us`;
-        const message = `مرحباً، كود الدخول الخاص بك هو: *${otpCode}*`;
+        // صيغة الرقم الخاصة بمكتبة Baileys
+        const formattedNumber = \`\${cleanNumber}@s.whatsapp.net\`; 
+        const message = \`مرحباً، كود الدخول الخاص بك هو: *\${otpCode}*\`;
         
-        await client.sendMessage(formattedNumber, message);
+        await sock.sendMessage(formattedNumber, { text: message });
+        console.log(\`تم الإرسال بنجاح إلى: \${cleanNumber}\`);
         res.json({ success: true, message: 'تم إرسال الكود بنجاح' });
     } catch (error) {
+        console.error('خطأ أثناء الإرسال:', error);
         res.status(500).json({ success: false, error: 'حدث خطأ أثناء محاولة الإرسال.' });
     }
 });
