@@ -7,6 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// إعدادات صارمة جداً لتقليل استهلاك الذاكرة العشوائية (RAM) في الاستضافات المجانية
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: './.data/auth' }),
     puppeteer: {
@@ -19,7 +20,14 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--single-process',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--mute-audio',
+            '--disable-background-networking',
+            '--disable-sync',
+            '--metrics-recording-only',
+            '--disable-default-apps'
         ]
     }
 });
@@ -28,7 +36,6 @@ let qrCodeData = '';
 let isReady = false;
 let statusMessage = 'جاري تهيئة النظام ومكتبة الواتساب...';
 
-// تتبع دقيق لحالات الواتساب
 client.on('qr', (qr) => {
     qrCodeData = qr;
     isReady = false;
@@ -37,7 +44,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('authenticated', () => {
-    statusMessage = 'تمت المصادقة من الجوال! جاري إعداد الاتصال...';
+    statusMessage = 'تمت المصادقة! جاري مزامنة البيانات (يرجى الانتظار)...';
     console.log('تمت المصادقة!');
 });
 
@@ -50,7 +57,7 @@ client.on('ready', () => {
 
 client.on('auth_failure', (msg) => {
     isReady = false;
-    statusMessage = 'حدث فشل في المصادقة، يرجى مسح الباركود من جديد.';
+    statusMessage = 'حدث فشل في المصادقة.';
     console.error('فشل في المصادقة:', msg);
 });
 
@@ -64,7 +71,6 @@ client.on('disconnected', (reason) => {
 
 client.initialize();
 
-// الواجهة التفاعلية (Dashboard)
 app.get('/', async (req, res) => {
     let htmlContent = `
     <!DOCTYPE html>
@@ -72,7 +78,7 @@ app.get('/', async (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta http-equiv="refresh" content="3">
-        <title>حالة نظام الواتساب</title>
+        <title>نظام الإرسال (Lovable API)</title>
         <style>
             body { font-family: Tahoma, Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #f4f4f9; }
             .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); display: inline-block; max-width: 500px; }
@@ -88,48 +94,29 @@ app.get('/', async (req, res) => {
     `;
 
     if (isReady) {
-        htmlContent += `
-            <div class="status ready">✅ ${statusMessage}</div>
-            <p>يمكنك الآن إرسال الأكواد من التطبيق بأمان.</p>
-            <p class="note">لا تغلق هذه الصفحة إذا كنت تختبر النظام، فهي ستُعلمك فوراً إذا انقطع الاتصال.</p>
-        `;
+        htmlContent += `<div class="status ready">✅ ${statusMessage}</div>`;
     } else if (qrCodeData) {
         try {
             const qrImage = await qrcode.toDataURL(qrCodeData);
             htmlContent += `
                 <div class="status waiting">⏳ ${statusMessage}</div>
                 <img src="${qrImage}" alt="QR Code" style="margin-top: 20px; border: 2px solid #000; padding: 10px; border-radius: 10px;" />
-                <p class="note">هذه الصفحة تتحدث برمجياً كل 3 ثوانٍ، لا تضغط على أي زر، فقط امسح الباركود وراقب الشاشة.</p>
             `;
         } catch (err) {
             htmlContent += `<p style="color:red;">خطأ في عرض الباركود.</p>`;
         }
     } else {
-        htmlContent += `
-            <div class="status waiting">⚙️ ${statusMessage}</div>
-            <p class="note">الرجاء الانتظار، الصفحة تُحدث نفسها تلقائياً...</p>
-        `;
+        htmlContent += `<div class="status waiting">⚙️ ${statusMessage}</div>`;
     }
 
-    htmlContent += `
-        </div>
-    </body>
-    </html>
-    `;
-
+    htmlContent += `</div></body></html>`;
     res.send(htmlContent);
 });
 
-// استقبال الطلبات من Lovable
 app.post('/send-otp', async (req, res) => {
     const { phoneNumber, otpCode } = req.body;
-    
-    if (!isReady) {
-        return res.status(500).json({ success: false, error: 'الواتساب غير متصل في الخادم حالياً.' });
-    }
-    if (!phoneNumber || !otpCode) {
-        return res.status(400).json({ success: false, error: 'البيانات المرسلة ناقصة.' });
-    }
+    if (!isReady) return res.status(500).json({ success: false, error: 'الواتساب غير متصل في الخادم حالياً.' });
+    if (!phoneNumber || !otpCode) return res.status(400).json({ success: false, error: 'البيانات ناقصة.' });
 
     try {
         const cleanNumber = phoneNumber.replace(/\D/g, '');
@@ -137,15 +124,11 @@ app.post('/send-otp', async (req, res) => {
         const message = `مرحباً، كود الدخول الخاص بك هو: *${otpCode}*`;
         
         await client.sendMessage(formattedNumber, message);
-        console.log(`تم الإرسال إلى: ${cleanNumber}`);
         res.json({ success: true, message: 'تم إرسال الكود بنجاح' });
     } catch (error) {
-        console.error('خطأ الإرسال:', error);
-        res.status(500).json({ success: false, error: 'حدث خطأ في الواتساب أثناء محاولة الإرسال.' });
+        res.status(500).json({ success: false, error: 'حدث خطأ أثناء محاولة الإرسال.' });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log('Server running on port', PORT);
-});
+app.listen(PORT, () => console.log('Server running on port', PORT));
