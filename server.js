@@ -15,20 +15,16 @@ let sock;
 
 // دالة الاتصال بالواتساب
 async function connectToWhatsApp() {
-    // حفظ ملفات الجلسة لكي لا يطلب الباركود في كل مرة
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        // إخفاء سجلات المكتبة لتخفيف الضغط على الخادم
         logger: pino({ level: 'silent' }) 
     });
 
-    // تحديث ملفات الاعتماد عند الاتصال
     sock.ev.on('creds.update', saveCreds);
 
-    // مراقبة حالة الاتصال
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
@@ -59,15 +55,12 @@ async function connectToWhatsApp() {
     });
 }
 
-// تشغيل الواتساب عند بدء الخادم
 connectToWhatsApp();
 
-// نقطة فحص الحالة للواجهة (بدون إرهاق الخادم)
 app.get('/status-check', (req, res) => {
     res.json({ isReady, qrCodeData, statusMessage });
 });
 
-// الواجهة التفاعلية (Dashboard)
 app.get('/', (req, res) => {
     const htmlContent = `
     <!DOCTYPE html>
@@ -133,7 +126,6 @@ app.get('/', (req, res) => {
     res.send(htmlContent);
 });
 
-// إرسال الكود من تطبيق Lovable
 app.post('/send-otp', async (req, res) => {
     const { phoneNumber, otpCode } = req.body;
     
@@ -142,12 +134,11 @@ app.post('/send-otp', async (req, res) => {
 
     try {
         const cleanNumber = phoneNumber.replace(/\D/g, '');
-        // صيغة الرقم الخاصة بمكتبة Baileys
-        const formattedNumber = \`\${cleanNumber}@s.whatsapp.net\`; 
-        const message = \`مرحباً، كود الدخول الخاص بك هو: *\${otpCode}*\`;
+        const formattedNumber = `${cleanNumber}@s.whatsapp.net`; 
+        const message = `مرحباً، كود الدخول الخاص بك هو: *${otpCode}*`;
         
         await sock.sendMessage(formattedNumber, { text: message });
-        console.log(\`تم الإرسال بنجاح إلى: \${cleanNumber}\`);
+        console.log(`تم الإرسال بنجاح إلى: ${cleanNumber}`);
         res.json({ success: true, message: 'تم إرسال الكود بنجاح' });
     } catch (error) {
         console.error('خطأ أثناء الإرسال:', error);
